@@ -33,7 +33,7 @@ import type {
 	NodeLoadingDetails,
 	WorkflowTestData,
 } from 'n8n-workflow';
-import { ApplicationError, ICredentialsHelper, NodeHelpers, WorkflowHooks } from 'n8n-workflow';
+import { ApplicationError, deepCopy, ICredentialsHelper, NodeHelpers, WorkflowHooks } from 'n8n-workflow';
 import { executeWorkflow } from './ExecuteWorkflow';
 
 import { FAKE_CREDENTIALS_DATA } from './FakeCredentialsMap';
@@ -327,7 +327,7 @@ export const equalityTest = async (testData: WorkflowTestData, types: INodeTypes
 				}
 			});
 		});
-		return expect(resultData, msg).toEqual(testData.output.nodeData[nodeName]);
+		return expect(deepCopy(resultData), msg).toEqual(testData.output.nodeData[nodeName]);
 	});
 
 	expect(result.finished).toEqual(true);
