@@ -41,7 +41,12 @@ const defaultOptions = {
 			TelemetryPlugin,
 			createRouter({
 				history: createWebHistory(),
-				routes: [],
+				routes: [
+					{
+						path: '/',
+						component: { template: '<div></div>' },
+					},
+				],
 			}),
 		],
 	},
