@@ -1,7 +1,10 @@
+import type { ProjectRelation } from '@n8n/api-types';
+import { CreateProjectDto, DeleteProjectDto, UpdateProjectDto } from '@n8n/api-types';
 import { combineScopes } from '@n8n/permissions';
 import type { Scope } from '@n8n/permissions';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import { In, Not } from '@n8n/typeorm';
+import { Response } from 'express';
 
 import type { Project } from '@/databases/entities/project';
 import { ProjectRepository } from '@/databases/repositories/project.repository';
@@ -14,16 +17,20 @@ import {
 	Patch,
 	ProjectScope,
 	Delete,
+	Body,
+	Param,
+	Query,
 } from '@/decorators';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { EventService } from '@/events/event.service';
-import { ProjectRequest } from '@/requests';
+import type { ProjectRequest } from '@/requests';
+import { AuthenticatedRequest } from '@/requests';
 import {
 	ProjectService,
 	TeamProjectOverQuotaError,
 	UnlicensedProjectRoleError,
-} from '@/services/project.service';
+} from '@/services/project.service.ee';
 import { RoleService } from '@/services/role.service';
 
 @RestController('/projects')
@@ -36,7 +43,7 @@ export class ProjectController {
 	) {}
 
 	@Get('/')
-	async getAllProjects(req: ProjectRequest.GetAll): Promise<Project[]> {
+	async getAllProjects(req: AuthenticatedRequest): Promise<Project[]> {
 		return await this.projectsService.getAccessibleProjects(req.user);
 	}
 
@@ -49,9 +56,9 @@ export class ProjectController {
 	@GlobalScope('project:create')
 	// Using admin as all plans that contain projects should allow admins at the very least
 	@Licensed('feat:projectRole:admin')
-	async createProject(req: ProjectRequest.Create) {
+	async createProject(req: AuthenticatedRequest, _res: Response, @Body payload: CreateProjectDto) {
 		try {
-			const project = await this.projectsService.createTeamProject(req.body.name, req.user);
+			const project = await this.projectsService.createTeamProject(req.user, payload);
 
 			this.eventService.emit('team-project-created', {
 				userId: req.user.id,
@@ -78,7 +85,8 @@ export class ProjectController {
 
 	@Get('/my-projects')
 	async getMyProjects(
-		req: ProjectRequest.GetMyProjects,
+		req: AuthenticatedRequest,
+		_res: Response,
 	): Promise<ProjectRequest.GetMyProjectsResponse> {
 		const relations = await this.projectsService.getProjectRelationsForUser(req.user);
 		const otherTeamProject = req.user.hasGlobalScope('project:read')
@@ -93,10 +101,7 @@ export class ProjectController {
 		for (const pr of relations) {
 			const result: ProjectRequest.GetMyProjectsResponse[number] = Object.assign(
 				this.projectRepository.create(pr.project),
-				{
-					role: pr.role,
-					scopes: req.query.includeScopes ? ([] as Scope[]) : undefined,
-				},
+				{ role: pr.role, scopes: [] },
 			);
 
 			if (result.scopes) {
@@ -119,7 +124,7 @@ export class ProjectController {
 					// own this relationship in that case we use the global user role
 					// instead of the relation role, which is for another user.
 					role: req.user.role,
-					scopes: req.query.includeScopes ? [] : undefined,
+					scopes: [],
 				},
 			);
 
@@ -143,7 +148,7 @@ export class ProjectController {
 	}
 
 	@Get('/personal')
-	async getPersonalProject(req: ProjectRequest.GetPersonalProject) {
+	async getPersonalProject(req: AuthenticatedRequest) {
 		const project = await this.projectsService.getPersonalProject(req.user);
 		if (!project) {
 			throw new NotFoundError('Could not find a personal project for this user');
@@ -162,16 +167,21 @@ export class ProjectController {
 
 	@Get('/:projectId')
 	@ProjectScope('project:read')
-	async getProject(req: ProjectRequest.Get): Promise<ProjectRequest.ProjectWithRelations> {
-		const [{ id, name, type }, relations] = await Promise.all([
-			this.projectsService.getProject(req.params.projectId),
-			this.projectsService.getProjectRelations(req.params.projectId),
+	async getProject(
+		req: AuthenticatedRequest,
+		_res: Response,
+		@Param('projectId') projectId: string,
+	): Promise<ProjectRequest.ProjectWithRelations> {
+		const [{ id, name, icon, type }, relations] = await Promise.all([
+			this.projectsService.getProject(projectId),
+			this.projectsService.getProjectRelations(projectId),
 		]);
 		const myRelation = relations.find((r) => r.userId === req.user.id);
 
 		return {
 			id,
 			name,
+			icon,
 			type,
 			relations: relations.map((r) => ({
 				id: r.user.id,
@@ -191,26 +201,29 @@ export class ProjectController {
 
 	@Patch('/:projectId')
 	@ProjectScope('project:update')
-	async updateProject(req: ProjectRequest.Update) {
-		if (req.body.name) {
-			await this.projectsService.updateProject(req.body.name, req.params.projectId);
+	async updateProject(
+		req: AuthenticatedRequest,
+		_res: Response,
+		@Body payload: UpdateProjectDto,
+		@Param('projectId') projectId: string,
+	) {
+		const { name, icon, relations } = payload;
+		if (name || icon) {
+			await this.projectsService.updateProject(projectId, { name, icon });
 		}
-		if (req.body.relations) {
-			await this.syncProjectRelations(req.params.projectId, req.body.relations);
+		if (relations) {
+			await this.syncProjectRelations(projectId, relations);
 
 			this.eventService.emit('team-project-updated', {
 				userId: req.user.id,
 				role: req.user.role,
-				members: req.body.relations,
-				projectId: req.params.projectId,
+				members: relations,
+				projectId,
 			});
 		}
 	}
 
-	async syncProjectRelations(
-		projectId: string,
-		relations: ProjectRequest.ProjectRelationPayload[],
-	) {
+	async syncProjectRelations(projectId: string, relations: ProjectRelation[]) {
 		try {
 			await this.projectsService.syncProjectRelations(projectId, relations);
 		} catch (e) {
@@ -223,17 +236,22 @@ export class ProjectController {
 
 	@Delete('/:projectId')
 	@ProjectScope('project:delete')
-	async deleteProject(req: ProjectRequest.Delete) {
-		await this.projectsService.deleteProject(req.user, req.params.projectId, {
-			migrateToProject: req.query.transferId,
+	async deleteProject(
+		req: AuthenticatedRequest,
+		_res: Response,
+		@Query query: DeleteProjectDto,
+		@Param('projectId') projectId: string,
+	) {
+		await this.projectsService.deleteProject(req.user, projectId, {
+			migrateToProject: query.transferId,
 		});
 
 		this.eventService.emit('team-project-deleted', {
 			userId: req.user.id,
 			role: req.user.role,
-			projectId: req.params.projectId,
-			removalType: req.query.transferId !== undefined ? 'transfer' : 'delete',
-			targetProjectId: req.query.transferId,
+			projectId,
+			removalType: query.transferId !== undefined ? 'transfer' : 'delete',
+			targetProjectId: query.transferId,
 		});
 	}
 }
