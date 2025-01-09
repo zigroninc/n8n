@@ -4,7 +4,7 @@ import { type Scope } from '@n8n/permissions';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import type { FindOptionsWhere, EntityManager } from '@n8n/typeorm';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
-import { In, Not } from '@n8n/typeorm';
+import { In } from '@n8n/typeorm';
 import { ApplicationError } from 'n8n-workflow';
 
 import { UNLIMITED_LICENSE_QUOTA } from '@/constants';
@@ -16,7 +16,6 @@ import { ProjectRepository } from '@/databases/repositories/project.repository';
 import { SharedCredentialsRepository } from '@/databases/repositories/shared-credentials.repository';
 import { SharedWorkflowRepository } from '@/databases/repositories/shared-workflow.repository';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
-import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { License } from '@/license';
 
@@ -31,9 +30,15 @@ export class TeamProjectOverQuotaError extends ApplicationError {
 	}
 }
 
-export class UnlicensedProjectRoleError extends ApplicationError {
+class UnlicensedProjectRoleError extends BadRequestError {
 	constructor(role: ProjectRole) {
 		super(`Your instance is not licensed to use role "${role}".`);
+	}
+}
+
+class ProjectNotFoundError extends NotFoundError {
+	constructor() {
+		super('Project not found.');
 	}
 }
 
@@ -76,8 +81,8 @@ export class ProjectService {
 		}
 
 		const project = await this.getProjectWithScope(user, projectId, ['project:delete']);
-		if (!project) {
-			throw new NotFoundError(`Could not find project with ID: ${projectId}`);
+		if (!project || project.type !== 'team') {
+			throw new ProjectNotFoundError();
 		}
 
 		let targetProject: Project | null = null;
@@ -92,13 +97,6 @@ export class ProjectService {
 					`Could not find project to migrate to. ID: ${targetProject}. You may lack permissions to create workflow and credentials in the target project.`,
 				);
 			}
-		}
-
-		// 0. check if this is a team project
-		if (project.type !== 'team') {
-			throw new ForbiddenError(
-				`Can't delete project. Project with ID "${projectId}" is not a team project.`,
-			);
 		}
 
 		// 1. delete or migrate workflows owned by this project
@@ -186,16 +184,14 @@ export class ProjectService {
 		return project;
 	}
 
-	async updateProject(
-		projectId: string,
-		data: Pick<UpdateProjectDto, 'name' | 'icon'>,
-	): Promise<Project> {
-		const result = await this.projectRepository.update({ id: projectId, type: 'team' }, data);
-
+	async updateProject(projectId: string, { name, icon }: UpdateProjectDto): Promise<void> {
+		const result = await this.projectRepository.update(
+			{ id: projectId, type: 'team' },
+			{ name, icon },
+		);
 		if (!result.affected) {
-			throw new ForbiddenError('Project not found');
+			throw new ProjectNotFoundError();
 		}
-		return await this.projectRepository.findOneByOrFail({ id: projectId });
 	}
 
 	async getPersonalProject(user: User): Promise<Project | null> {
@@ -211,28 +207,73 @@ export class ProjectService {
 
 	async syncProjectRelations(
 		projectId: string,
-		relations: Array<{ userId: string; role: ProjectRole }>,
+		relations: Required<UpdateProjectDto>['relations'],
 	) {
-		const project = await this.projectRepository.findOneOrFail({
-			where: { id: projectId, type: Not('personal') },
-			relations: { projectRelations: true },
-		});
-
-		// Check to see if the instance is licensed to use all roles provided
-		for (const r of relations) {
-			const existing = project.projectRelations.find((pr) => pr.userId === r.userId);
-			// We don't throw an error if the user already exists with that role so
-			// existing projects continue working as is.
-			if (existing?.role !== r.role && !this.roleService.isRoleLicensed(r.role)) {
-				throw new UnlicensedProjectRoleError(r.role);
-			}
-		}
+		const project = await this.getTeamProjectWithRelations(projectId);
+		this.checkRolesLicensed(project, relations);
 
 		await this.projectRelationRepository.manager.transaction(async (em) => {
 			await this.pruneRelations(em, project);
 			await this.addManyRelations(em, project, relations);
 		});
 		await this.clearCredentialCanUseExternalSecretsCache(projectId);
+	}
+
+	async addUsersToProject(projectId: string, relations: Required<UpdateProjectDto>['relations']) {
+		const project = await this.getTeamProjectWithRelations(projectId);
+		this.checkRolesLicensed(project, relations);
+
+		// TODO: assert that the user exists, else invite the user first
+		// TODO: skip inserting if the user already exists
+		await this.projectRelationRepository.upsert(
+			relations.map((relation) =>
+				this.projectRelationRepository.create({ projectId, ...relation }),
+			),
+			['projectId', 'userId'],
+		);
+	}
+
+	private async getTeamProjectWithRelations(projectId: string) {
+		const project = await this.projectRepository.findOne({
+			where: { id: projectId, type: 'team' },
+			relations: { projectRelations: true },
+		});
+		if (!project) {
+			throw new ProjectNotFoundError();
+		}
+		return project;
+	}
+
+	/** Check to see if the instance is licensed to use all roles provided */
+	private checkRolesLicensed(project: Project, relations: Required<UpdateProjectDto>['relations']) {
+		for (const { role, userId } of relations) {
+			const existing = project.projectRelations.find((pr) => pr.userId === userId);
+			// We don't throw an error if the user already exists with that role so
+			// existing projects continue working as is.
+			if (existing?.role !== role && !this.roleService.isRoleLicensed(role)) {
+				throw new UnlicensedProjectRoleError(role);
+			}
+		}
+	}
+
+	async deleteUserFromProject(projectId: string, userId: string) {
+		const projectExists = await this.projectRepository.existsBy({ id: projectId });
+		if (!projectExists) {
+			throw new ProjectNotFoundError();
+		}
+
+		// TODO: do we need to prevent project owner from being removed?
+		await this.projectRelationRepository.delete({ projectId, userId });
+	}
+
+	async changeUserRoleInProject(projectId: string, userId: string, role: ProjectRole) {
+		const projectUserExists = await this.projectRelationRepository.existsBy({ projectId, userId });
+		if (!projectUserExists) {
+			throw new ProjectNotFoundError();
+		}
+
+		// TODO: do we need to block any specific roles here?
+		await this.projectRelationRepository.update({ projectId, userId }, { role });
 	}
 
 	async clearCredentialCanUseExternalSecretsCache(projectId: string) {

@@ -20,7 +20,7 @@ export const projectRoleSchema = z.enum([
 export type ProjectRole = z.infer<typeof projectRoleSchema>;
 
 export const projectRelationSchema = z.object({
-	userId: z.string(),
+	userId: z.string().min(1),
 	role: projectRoleSchema,
 });
 export type ProjectRelation = z.infer<typeof projectRelationSchema>;

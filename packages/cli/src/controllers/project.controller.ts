@@ -1,4 +1,3 @@
-import type { ProjectRelation } from '@n8n/api-types';
 import { CreateProjectDto, DeleteProjectDto, UpdateProjectDto } from '@n8n/api-types';
 import { combineScopes } from '@n8n/permissions';
 import type { Scope } from '@n8n/permissions';
@@ -26,11 +25,7 @@ import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { EventService } from '@/events/event.service';
 import type { ProjectRequest } from '@/requests';
 import { AuthenticatedRequest } from '@/requests';
-import {
-	ProjectService,
-	TeamProjectOverQuotaError,
-	UnlicensedProjectRoleError,
-} from '@/services/project.service.ee';
+import { ProjectService, TeamProjectOverQuotaError } from '@/services/project.service.ee';
 import { RoleService } from '@/services/role.service';
 
 @RestController('/projects')
@@ -211,26 +206,15 @@ export class ProjectController {
 		if (name || icon) {
 			await this.projectsService.updateProject(projectId, { name, icon });
 		}
-		if (relations) {
-			await this.syncProjectRelations(projectId, relations);
 
+		if (relations) {
+			await this.projectsService.syncProjectRelations(projectId, relations);
 			this.eventService.emit('team-project-updated', {
 				userId: req.user.id,
 				role: req.user.role,
 				members: relations,
 				projectId,
 			});
-		}
-	}
-
-	async syncProjectRelations(projectId: string, relations: ProjectRelation[]) {
-		try {
-			await this.projectsService.syncProjectRelations(projectId, relations);
-		} catch (e) {
-			if (e instanceof UnlicensedProjectRoleError) {
-				throw new BadRequestError(e.message);
-			}
-			throw e;
 		}
 	}
 

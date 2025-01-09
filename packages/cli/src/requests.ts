@@ -1,4 +1,4 @@
-import type { ProjectIcon, ProjectRelation, ProjectRole, ProjectType } from '@n8n/api-types';
+import type { ProjectIcon, ProjectRole, ProjectType } from '@n8n/api-types';
 import type { Scope } from '@n8n/permissions';
 import type express from 'express';
 import type {
@@ -396,9 +396,6 @@ export declare namespace ProjectRequest {
 		relations: ProjectRelationResponse[];
 		scopes: Scope[];
 	};
-
-	type DeleteUser = AuthenticatedRequest<{ projectId: string; id: string }, {}, {}, {}>;
-	type AddUsers = AuthenticatedRequest<{ projectId: string }, {}, { users: ProjectRelation[] }>;
 }
 
 // ----------------------------------

@@ -1,11 +1,19 @@
-import { CreateProjectDto, DeleteProjectDto, UpdateProjectDto } from '@n8n/api-types';
+import {
+	AddUsersToProjectDto,
+	ChangeUserRoleInProject,
+	CreateProjectDto,
+	DeleteProjectDto,
+	UpdateProjectDto,
+} from '@n8n/api-types';
 import { Container } from '@n8n/di';
 import type { Response } from 'express';
 
 import { ProjectController } from '@/controllers/project.controller';
 import { ProjectRepository } from '@/databases/repositories/project.repository';
+import { ResponseError } from '@/errors/response-errors/abstract/response.error';
 import type { PaginatedRequest } from '@/public-api/types';
-import type { AuthenticatedRequest, ProjectRequest } from '@/requests';
+import type { AuthenticatedRequest } from '@/requests';
+import { ProjectService } from '@/services/project.service.ee';
 
 import { globalScope, isLicensed, validCursor } from '../../shared/middlewares/global.middleware';
 import { encodeNextCursor } from '../../shared/services/pagination.service';
@@ -87,65 +95,67 @@ export = {
 			});
 		},
 	],
-	deleteUserFromProject: [
-		isLicensed('feat:projectRole:admin'),
-		globalScope('project:update'),
-		async (req: ProjectRequest.DeleteUser, res: Response) => {
-			const { projectId, id: userId } = req.params;
-
-			const project = await Container.get(ProjectRepository).findOne({
-				where: { id: projectId },
-				relations: { projectRelations: true },
-			});
-
-			if (!project) {
-				return res.status(404).send({ message: 'Not found' });
-			}
-
-			const relations = project.projectRelations.filter((relation) => relation.userId !== userId);
-
-			await Container.get(ProjectController).syncProjectRelations(projectId, relations);
-
-			return res.status(204).send();
-		},
-	],
 	addUsersToProject: [
 		isLicensed('feat:projectRole:admin'),
 		globalScope('project:update'),
-		async (req: ProjectRequest.AddUsers, res: Response) => {
-			const { projectId } = req.params;
-			const { users } = req.body;
-
-			const project = await Container.get(ProjectRepository).findOne({
-				where: { id: projectId },
-				relations: { projectRelations: true },
-			});
-
-			if (!project) {
-				return res.status(404).send({ message: 'Not found' });
+		async (req: AuthenticatedRequest<{ projectId: string }>, res: Response) => {
+			const payload = AddUsersToProjectDto.safeParse(req.body);
+			if (payload.error) {
+				return res.status(400).json(payload.error.errors[0]);
 			}
 
-			const existingUsers = project.projectRelations.map((relation) => ({
-				userId: relation.userId,
-				role: relation.role,
-			}));
-
-			// TODO:
-			// - What happens when the user is already in the project?
-			// - What happens when the user is not found on the instance?
-
 			try {
-				await Container.get(ProjectController).syncProjectRelations(projectId, [
-					...existingUsers,
-					...users,
-				]);
+				await Container.get(ProjectService).addUsersToProject(
+					req.params.projectId,
+					payload.data.relations,
+				);
 			} catch (error) {
-				return res
-					.status(400)
-					.send({ message: error instanceof Error ? error.message : 'Bad request' });
+				if (error instanceof ResponseError) {
+					return res.status(error.httpStatusCode).send({ message: error.message });
+				}
+				throw error;
 			}
 
 			return res.status(201).send();
+		},
+	],
+	changeUserRoleInProject: [
+		isLicensed('feat:projectRole:admin'),
+		globalScope('project:update'),
+		async (req: AuthenticatedRequest<{ projectId: string; userId: string }>, res: Response) => {
+			const payload = ChangeUserRoleInProject.safeParse(req.body);
+			if (payload.error) {
+				return res.status(400).json(payload.error.errors[0]);
+			}
+
+			const { projectId, userId } = req.params;
+			const { role } = payload.data;
+			try {
+				await Container.get(ProjectService).changeUserRoleInProject(projectId, userId, role);
+			} catch (error) {
+				if (error instanceof ResponseError) {
+					return res.status(error.httpStatusCode).send({ message: error.message });
+				}
+				throw error;
+			}
+
+			return res.status(201).send();
+		},
+	],
+	deleteUserFromProject: [
+		isLicensed('feat:projectRole:admin'),
+		globalScope('project:update'),
+		async (req: AuthenticatedRequest<{ projectId: string; userId: string }>, res: Response) => {
+			const { projectId, userId } = req.params;
+			try {
+				await Container.get(ProjectService).deleteUserFromProject(projectId, userId);
+			} catch (error) {
+				if (error instanceof ResponseError) {
+					return res.status(error.httpStatusCode).send({ message: error.message });
+				}
+				throw error;
+			}
+			return res.status(204).send();
 		},
 	],
 };
