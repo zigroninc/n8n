@@ -16,6 +16,7 @@ import { ProjectRepository } from '@/databases/repositories/project.repository';
 import { SharedCredentialsRepository } from '@/databases/repositories/shared-credentials.repository';
 import { SharedWorkflowRepository } from '@/databases/repositories/shared-workflow.repository';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
+import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { License } from '@/license';
 
@@ -81,7 +82,7 @@ export class ProjectService {
 		}
 
 		const project = await this.getProjectWithScope(user, projectId, ['project:delete']);
-		if (!project || project.type !== 'team') {
+		if (!project) {
 			throw new ProjectNotFoundError(projectId);
 		}
 
@@ -97,6 +98,13 @@ export class ProjectService {
 					`Could not find project to migrate to. ID: ${targetProject}. You may lack permissions to create workflow and credentials in the target project.`,
 				);
 			}
+		}
+
+		// 0. check if this is a team project
+		if (project.type !== 'team') {
+			throw new ForbiddenError(
+				`Can't delete project. Project with ID "${projectId}" is not a team project.`,
+			);
 		}
 
 		// 1. delete or migrate workflows owned by this project
